@@ -36,6 +36,7 @@ library
       Symtegration.Integration
       Symtegration.Integration.Polynomial
       Symtegration.Integration.Powers
+      Symtegration.Integration.Substitution
       Symtegration.Integration.Term
       Symtegration.Integration.Trigonometric
       Symtegration.Polynomial
