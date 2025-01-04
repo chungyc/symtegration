@@ -1,7 +1,7 @@
 -- |
 -- Module: Symtegration.Integration.Rational
 -- Description: Integration of rational functions.
--- Copyright: Copyright 2024 Yoo Chung
+-- Copyright: Copyright 2025 Yoo Chung
 -- License: Apache-2.0
 -- Maintainer: dev@chungyc.org
 --
@@ -17,6 +17,8 @@ module Symtegration.Integration.Rational
     -- | Algorithms used for integrating rational functions.
     hermiteReduce,
     rationalIntegralLogTerms,
+    complexLogTermToRealTerm,
+    complexLogTermToAtanTerm,
 
     -- * Support
 
@@ -32,6 +34,7 @@ import Data.Text (Text)
 import Symtegration.Polynomial hiding (integrate)
 import Symtegration.Polynomial qualified as Polynomial
 import Symtegration.Polynomial.Indexed
+import Symtegration.Polynomial.Solve
 import Symtegration.Polynomial.Symbolic
 import Symtegration.Symbolic
 import Symtegration.Symbolic.Simplify
@@ -98,27 +101,6 @@ integrate v e
               let ss = map (\x -> (x, mapCoefficients (toExpr x) s)) roots
               return $ sum $ map (\(x, p) -> x * Log' (toExpression v toSymbolicCoefficient p)) ss
             toExpr x p = getSum $ foldTerms (\e'' c -> Sum $ fromRational c * (x ** Number (fromIntegral e''))) p
-
-        -- Derive the roots for the given polynomial.
-        -- Incomplete for now.
-        solve :: IndexedPolynomial -> Maybe [Expression]
-        solve p
-          | degree p == 1 = Just [fromRational $ (-coefficient p 0) / coefficient p 1]
-          | degree p == 2 = solveQuadratic (coefficient p 2) (coefficient p 1) (coefficient p 0)
-          | otherwise = Nothing
-
-        -- For now, ignores complex roots.
-        solveQuadratic :: Rational -> Rational -> Rational -> Maybe [Expression]
-        solveQuadratic a b c
-          | sq == 0 = Just [fromRational $ (-b) / (2 * a)]
-          | sq > 0 =
-              Just
-                [ ((-fromRational b) + fromRational sq ** (1 / 2)) / (2 * fromRational a),
-                  ((-fromRational b) - fromRational sq ** (1 / 2)) / (2 * fromRational a)
-                ]
-          | otherwise = Nothing
-          where
-            sq = b * b - 4 * a * c
 
         fromRationalFunction (RationalFunction u w) = u' / w'
           where
@@ -328,7 +310,136 @@ rationalIntegralLogTerms (RationalFunction a d) = do
           | (Just p') <- reconstruct xs = Just $ scale c (power e) + p'
           | otherwise = Nothing
 
--- If there are any nothings, then turn the list into nothing.
+-- | Given polynomials \(A\) and \(B\),
+-- return a sum \(f\) of inverse tangents such that the following is true.
+--
+-- \[
+-- \frac{df}{dx} = \frac{d}{dx} i \log \left( \frac{A + iB}{A - iB} \right)
+-- \]
+--
+-- This allows integrals to be evaluated with only real-valued functions.
+-- It also avoids the discontinuities in real-valued indefinite integrals which may result
+-- when the integral uses logarithms with complex arguments.
+--
+-- For example,
+--
+-- >>> toHaskell $ simplify $ complexLogTermToAtanTerm "x" (power 3 - 3 * power 1) (power 2 - 2)
+-- "2 * (atan x) + 2 * (atan (((-1) * x + (-1) * (x ** 5) + 3 * (x ** 3)) / (-2))) + 2 * (atan (x ** 3))"
+--
+-- so it is the case that
+--
+-- \[ \frac{d}{dx} \left( i \log \left( \frac{(x^3-3x) + i(x^2-2)}{(x^3-3x) - i(x^2-2)} \right) \right) =
+-- \frac{d}{dx} \left( 2 \tan^{-1} \left(\frac{x^5-3x^3+x}{2}\right) + 2 \tan^{-1} \left(x^3\right) + 2 \tan^{-1} x \right) \]
+complexLogTermToAtanTerm ::
+  -- | Symbol for the variable.
+  Text ->
+  -- | Polynomial \(A\).
+  IndexedPolynomial ->
+  -- | Polynomial \(B\).
+  IndexedPolynomial ->
+  -- | Sum \(f\) of inverse tangents.
+  Expression
+complexLogTermToAtanTerm v a b
+  | r == 0 = 2 * atan (a' / b')
+  | degree a < degree b = complexLogTermToAtanTerm v (-b) a
+  | otherwise = 2 * atan (s' / g') + complexLogTermToAtanTerm v d c
+  where
+    (_, r) = a `divide` b
+    (d, c, g) = extendedEuclidean b (-a)
+    a' = toExpression v toRationalCoefficient a
+    b' = toExpression v toRationalCoefficient b
+    g' = toExpression v toRationalCoefficient g
+    s' = toExpression v toRationalCoefficient $ a * d + b * c
+
+-- | For the ingredients of a complex logarithm, return the ingredients of a real function.
+--
+-- Specifically, for polynomials \((R(t), S(t,x))\) such that
+--
+-- \[
+-- \frac{df}{dx} = \frac{d}{dx} \sum_{\alpha \in \{ t \mid R(t) = 0 \}} \left( \alpha \log \left( S(\alpha,x) \right) \right)
+-- \]
+--
+-- then with return value \(((P(u,v), Q(u,v)), (A(u,v,x), B(u,v,x)))\),
+-- and a return value \(f_{u,v}\) from 'complexLogTermToAtanTerm' for \(A(u,v)\) and \(B(u,v)\), the real function is
+--
+-- \[
+-- \sum_{(a,b) \in \{(u,v) \mid P(u,v)=Q(u,v)=0, b > 0\}}
+--   \left( a \log \left( A(a,b,x)^2 + B(a,b,x)^2 \right) + b \log (f_{a,b}(x)) \right)
+-- + \sum_{a \in \{t \mid R(t)=0 \}} \left( a \log (S(a,x)) \right)
+-- \]
+--
+-- For example,
+--
+-- >>> let r = 4 * power 2 + 1 :: IndexedPolynomial
+-- >>> let s = power 3 + scale (2 * power 1) (power 2) - 3 * power 1 - scale (4 * power 1) 1 :: IndexedPolynomialWith IndexedPolynomial
+-- >>> complexLogTermToRealTerm (r, s)
+-- (([(0,(-4)x^2 + 1),(2,4)],[(1,8x)]),([(0,[(1,(-4))]),(1,[(0,(-3))]),(2,[(1,2)]),(3,[(0,1)])],[(0,[(0,(-4)x)]),(2,[(0,2x)])]))
+complexLogTermToRealTerm ::
+  (IndexedPolynomial, IndexedPolynomialWith IndexedPolynomial) ->
+  ( (IndexedPolynomialWith IndexedPolynomial, IndexedPolynomialWith IndexedPolynomial),
+    (IndexedPolynomialWith (IndexedPolynomialWith IndexedPolynomial), IndexedPolynomialWith (IndexedPolynomialWith IndexedPolynomial))
+  )
+complexLogTermToRealTerm (q, s) = ((qp, qq), (sp, sq))
+  where
+    -- For all of the following, i is the imaginary number.
+    -- We use an i polynomial instead of Complex to represent complex numbers
+    -- because the Complex a is not an instance of the Num class unless a is
+    -- an instance of the RealFloat class.
+
+    -- We use polynomial coefficients to introduce a separate variable.
+    -- An alternative would have been to use Expression coefficients,
+    -- but this would require a guarantee that we can rewrite an Expression
+    -- down to the degree where we can tease apart the real and imaginary parts
+    -- in a complex number.
+
+    -- Compute q(u+iv) as an i polynomial with coefficients
+    -- of u polynomials with coefficients
+    -- of v polynomials with rational coefficients.
+    q' = getSum $ foldTerms reduceImaginary $ getSum $ foldTerms fromTerm q
+      where
+        fromTerm :: Int -> Rational -> Sum (IndexedPolynomialWith (IndexedPolynomialWith IndexedPolynomial))
+        fromTerm e c = Sum $ c' * (u + i * v) ^ e
+          where
+            c' = scale (scale (scale c 1) 1) 1
+        i = power 1
+        u = scale (power 1) 1
+        v = scale (scale (power 1) 1) 1
+    -- q' == qp + i * qq
+    (qp, qq) = (coefficient q' 0, coefficient q' 1)
+
+    -- Compute s(u+iv,x) as an i polynomial with coefficients
+    -- of x polynomials with coefficients
+    -- of u polynomials with coefficients
+    -- of v polynomials with rational coefficients.
+    s' = getSum $ foldTerms reduceImaginary $ getSum $ foldTerms fromTerm s
+      where
+        fromTerm :: Int -> IndexedPolynomial -> Sum (IndexedPolynomialWith (IndexedPolynomialWith (IndexedPolynomialWith IndexedPolynomial)))
+        fromTerm e c = Sum $ c' * x ^ e
+          where
+            c' = getSum $ foldTerms fromCoefficient c
+            fromCoefficient e' c'' = Sum $ c''' * (u + i * v) ^ e'
+              where
+                c''' = scale (scale (scale (scale c'' 1) 1) 1) 1
+        i = power 1
+        x = scale (power 1) 1
+        u = scale (scale (power 1) 1) 1
+        v = scale (scale (scale (power 1) 1) 1) 1
+    -- s' = sp + i * sq
+    (sp, sq) = (coefficient s' 0, coefficient s' 1)
+
+    -- For terms in polynomials of i, reduce them to the form x or i*x.
+    reduceImaginary :: (Eq a, Num a) => Int -> a -> Sum (IndexedPolynomialWith a)
+    reduceImaginary e c = Sum $ case e `mod` 4 of
+      0 -> c'
+      1 -> c' * i
+      2 -> c' * (-1)
+      3 -> c' * (-i)
+      _ -> 0 -- Not possible.
+      where
+        i = power 1
+        c' = scale c 1
+
+-- | If there are any nothings, then turn the list into nothing.
 -- Otherwise, turn it into the list of just the elements.
 toMaybeList :: [Maybe a] -> Maybe [a]
 toMaybeList [] = Just []
